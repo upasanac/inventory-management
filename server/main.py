@@ -2,9 +2,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from pydantic import BaseModel
+from datetime import datetime, timedelta
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
 
 app = FastAPI(title="Factory Inventory Management System")
+
+# Fixed delivery lead time for all restocking orders (no per-item lead time data exists)
+RESTOCK_LEAD_TIME_DAYS = 14
 
 # Quarter mapping for date filtering
 QUARTER_MAP = {
@@ -80,6 +84,8 @@ class Order(BaseModel):
     actual_delivery: Optional[str] = None
     warehouse: Optional[str] = None
     category: Optional[str] = None
+    source: Optional[str] = None
+    lead_time_days: Optional[int] = None
 
 class DemandForecast(BaseModel):
     id: str
@@ -119,6 +125,84 @@ class CreatePurchaseOrderRequest(BaseModel):
     unit_cost: float
     expected_delivery_date: str
     notes: Optional[str] = None
+
+class RestockRecommendationItem(BaseModel):
+    sku: str
+    item_name: str
+    category: str
+    warehouse: str
+    unit_cost: float
+    current_demand: int
+    forecasted_demand: int
+    trend: str
+    recommended_quantity: int
+    line_total: float
+
+class RestockRecommendationResponse(BaseModel):
+    recommendations: List[RestockRecommendationItem]
+    budget: float
+    total_cost: float
+    remaining_budget: float
+    items_covered: int
+    total_eligible_items: int
+    lead_time_days: int
+
+class RestockOrderRequest(BaseModel):
+    budget: float
+    warehouse: Optional[str] = None
+    category: Optional[str] = None
+
+def _build_restock_candidates(warehouse: Optional[str] = None, category: Optional[str] = None) -> list:
+    """Join demand forecasts to (filtered) inventory by SKU and build a list of
+    restock candidates, sorted cheapest-to-cover first so a greedy budget fill
+    maximizes the number of distinct items covered."""
+    inv_by_sku = {item['sku']: item for item in apply_filters(inventory_items, warehouse, category)}
+
+    candidates = []
+    for forecast in demand_forecasts:
+        inventory_item = inv_by_sku.get(forecast['item_sku'])
+        if inventory_item is None:
+            continue
+
+        recommended_quantity = forecast['forecasted_demand'] - forecast['current_demand']
+        if recommended_quantity <= 0:
+            continue
+
+        line_total = round(recommended_quantity * inventory_item['unit_cost'], 2)
+        candidates.append({
+            'sku': forecast['item_sku'],
+            'item_name': forecast['item_name'],
+            'category': inventory_item['category'],
+            'warehouse': inventory_item['warehouse'],
+            'unit_cost': inventory_item['unit_cost'],
+            'current_demand': forecast['current_demand'],
+            'forecasted_demand': forecast['forecasted_demand'],
+            'trend': forecast['trend'],
+            'recommended_quantity': recommended_quantity,
+            'line_total': line_total,
+        })
+
+    candidates.sort(key=lambda c: (c['line_total'], c['sku']))
+    return candidates
+
+def _select_within_budget(candidates: list, budget: float) -> tuple:
+    """Greedily select candidates (already sorted ascending by cost) to
+    maximize the number of items covered within budget. Since candidates are
+    sorted ascending and costs are non-negative, stopping at the first one
+    that doesn't fit is equivalent to skipping it and scanning the rest."""
+    selected = []
+    remaining = round(budget, 2)
+
+    for candidate in candidates:
+        if candidate['line_total'] <= remaining:
+            selected.append(candidate)
+            remaining -= candidate['line_total']
+        else:
+            break
+
+    total_cost = round(sum(c['line_total'] for c in selected), 2)
+    remaining_budget = round(budget - total_cost, 2)
+    return selected, total_cost, remaining_budget
 
 # API endpoints
 @app.get("/")
@@ -165,6 +249,78 @@ def get_order(order_id: str):
 def get_demand_forecasts():
     """Get demand forecasts"""
     return demand_forecasts
+
+@app.get("/api/restocking/recommendations", response_model=RestockRecommendationResponse)
+def get_restock_recommendations(
+    budget: float,
+    warehouse: Optional[str] = None,
+    category: Optional[str] = None
+):
+    """Recommend demand-forecast items to restock within a given budget,
+    maximizing the number of distinct items covered."""
+    if budget < 0:
+        raise HTTPException(status_code=400, detail="Budget must be non-negative")
+
+    candidates = _build_restock_candidates(warehouse, category)
+    selected, total_cost, remaining_budget = _select_within_budget(candidates, budget)
+
+    return {
+        "recommendations": selected,
+        "budget": budget,
+        "total_cost": total_cost,
+        "remaining_budget": remaining_budget,
+        "items_covered": len(selected),
+        "total_eligible_items": len(candidates),
+        "lead_time_days": RESTOCK_LEAD_TIME_DAYS,
+    }
+
+@app.post("/api/orders/restock", response_model=Order)
+def create_restock_order(payload: RestockOrderRequest):
+    """Create a new order from the current budget-based restock recommendation.
+    The recommendation is re-derived server-side from budget/filters only --
+    the client never submits items or prices directly."""
+    if payload.budget < 0:
+        raise HTTPException(status_code=400, detail="Budget must be non-negative")
+
+    candidates = _build_restock_candidates(payload.warehouse, payload.category)
+    selected, total_cost, _ = _select_within_budget(candidates, payload.budget)
+
+    if not selected:
+        raise HTTPException(
+            status_code=400,
+            detail="No items can be recommended for the given budget and filters"
+        )
+
+    order_date_dt = datetime.now()
+    new_id = str(max(int(o['id']) for o in orders) + 1)
+    order_dict = {
+        "id": new_id,
+        "order_number": f"RST-{order_date_dt.strftime('%Y%m%d%H%M%S')}",
+        "customer": "Internal Restocking Order",
+        "items": [
+            {
+                "sku": c["sku"],
+                "name": c["item_name"],
+                "quantity": c["recommended_quantity"],
+                "unit_price": c["unit_cost"],
+            }
+            for c in selected
+        ],
+        "status": "Processing",
+        "order_date": order_date_dt.isoformat(),
+        "expected_delivery": (order_date_dt + timedelta(days=RESTOCK_LEAD_TIME_DAYS)).isoformat(),
+        "total_value": total_cost,
+        "actual_delivery": None,
+        "warehouse": payload.warehouse if payload.warehouse and payload.warehouse != 'all' else None,
+        "category": payload.category if payload.category and payload.category != 'all' else None,
+        "source": "restocking",
+        "lead_time_days": RESTOCK_LEAD_TIME_DAYS,
+    }
+    # First mutation endpoint in this backend: appending a genuinely new order
+    # is a "create" operation, distinct from the filter-on-copy mutation
+    # anti-pattern documented in server/CLAUDE.md.
+    orders.append(order_dict)
+    return order_dict
 
 @app.get("/api/backlog", response_model=List[BacklogItem])
 def get_backlog():

@@ -6,6 +6,7 @@ export default {
     orders: 'Orders',
     finance: 'Finance',
     demandForecast: 'Demand Forecast',
+    restocking: 'Restocking',
     companyName: 'Catalyst Components',
     subtitle: 'Inventory Management System'
   },
@@ -106,6 +107,7 @@ export default {
     title: 'Orders',
     description: 'View and manage customer orders',
     allOrders: 'All Orders',
+    submittedOrders: 'Submitted Orders',
     totalOrders: 'Total Orders',
     totalRevenue: 'Total Revenue',
     avgOrderValue: 'Avg Order Value',
@@ -125,7 +127,9 @@ export default {
       totalValue: 'Total Value',
       status: 'Status',
       expectedDelivery: 'Expected Delivery',
-      actualDelivery: 'Actual Delivery'
+      actualDelivery: 'Actual Delivery',
+      leadTime: 'Lead Time',
+      leadTimeDays: '{days} days'
     }
   },
 
@@ -186,6 +190,36 @@ export default {
       trend: 'Trend',
       period: 'Period'
     }
+  },
+
+  // Restocking
+  restocking: {
+    title: 'Restocking',
+    description: 'Set a budget and get item recommendations from demand forecasts to restock',
+    budgetLabel: 'Available Budget',
+    itemsCovered: 'Items Covered',
+    totalCost: 'Total Cost',
+    remainingBudget: 'Remaining Budget',
+    leadTime: 'Lead Time',
+    leadTimeDays: '{days} days',
+    recommendedItems: 'Recommended Items',
+    table: {
+      sku: 'SKU',
+      itemName: 'Item Name',
+      category: 'Category',
+      warehouse: 'Warehouse',
+      currentDemand: 'Current Demand',
+      forecastedDemand: 'Forecasted Demand',
+      trend: 'Trend',
+      recommendedQty: 'Recommended Qty',
+      unitCost: 'Unit Cost',
+      lineTotal: 'Line Total'
+    },
+    placeOrder: 'Place Order',
+    placingOrder: 'Placing Order...',
+    noRecommendations: 'No items can be recommended for this budget and filter selection',
+    orderPlacedSuccess: 'Order placed successfully. Expected delivery in {days} days.',
+    viewInOrders: 'View in Orders'
   },
 
   // Filters
